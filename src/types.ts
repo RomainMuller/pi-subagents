@@ -5,6 +5,7 @@
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { LifetimeUsage } from "./usage.js";
+import type { WorktreeCleanupResult, WorktreeInfo } from "./worktree.js";
 
 export type { ThinkingLevel };
 
@@ -19,6 +20,9 @@ export type MemoryScope = "user" | "project" | "local";
 
 /** Isolation mode for agent execution. */
 export type IsolationMode = "worktree";
+
+/** Repository backend used for worktree isolation. */
+export type IsolationBackend = "auto" | "jj" | "git";
 
 /** Unified agent configuration — used for both default and user-defined agents. */
 export interface AgentConfig {
@@ -62,7 +66,7 @@ export interface AgentConfig {
   isolated?: boolean;
   /** Persistent memory scope — agents with memory get a persistent directory and MEMORY.md */
   memory?: MemoryScope;
-  /** Isolation mode — "worktree" runs the agent in a temporary git worktree */
+  /** Isolation mode — "worktree" runs the agent in a temporary isolated repository workspace. */
   isolation?: IsolationMode;
   /** true = this is an embedded default agent (informational) */
   isDefault?: boolean;
@@ -102,10 +106,10 @@ export interface AgentRecord {
   resultConsumed?: boolean;
   /** Steering messages queued before the session was ready. */
   pendingSteers?: string[];
-  /** Worktree info if the agent is running in an isolated worktree. */
-  worktree?: { path: string; branch: string; baseSha: string; workPath: string };
-  /** Worktree cleanup result after agent completion. */
-  worktreeResult?: { hasChanges: boolean; branch?: string };
+  /** Workspace info if the agent is running with worktree isolation. */
+  worktree?: WorktreeInfo;
+  /** Workspace cleanup result after agent completion. */
+  worktreeResult?: WorktreeCleanupResult;
   /** The tool_use_id from the original Agent tool call. */
   toolCallId?: string;
   /** Path to the streaming output transcript file. */
@@ -176,8 +180,13 @@ export interface NotificationDetails {
 }
 
 export interface EnvInfo {
+  /** Kept for compatibility with callers that distinguish Git specifically. */
   isGitRepo: boolean;
   branch: string;
+  /** Preferred repository interface for this working directory. */
+  vcs?: "jj" | "git";
+  /** Current jj change id/description when `vcs` is `jj`. */
+  change?: string;
   platform: string;
 }
 

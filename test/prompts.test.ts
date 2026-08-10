@@ -6,12 +6,21 @@ import type { AgentConfig, EnvInfo } from "../src/types.js";
 const env: EnvInfo = {
   isGitRepo: true,
   branch: "main",
+  vcs: "git",
   platform: "darwin",
 };
 
 const envNoGit: EnvInfo = {
   isGitRepo: false,
   branch: "",
+  platform: "linux",
+};
+
+const envJj: EnvInfo = {
+  isGitRepo: false,
+  branch: "",
+  vcs: "jj",
+  change: "abc12345 agent work",
   platform: "linux",
 };
 
@@ -33,11 +42,19 @@ describe("buildAgentPrompt", () => {
     expect(prompt).toContain("darwin");
   });
 
-  it("handles non-git repos", () => {
+  it("handles directories without version control", () => {
     const config = getDefaultConfig("Explore");
     const prompt = buildAgentPrompt(config, "/workspace", envNoGit);
-    expect(prompt).toContain("Not a git repository");
+    expect(prompt).toContain("Not a version-controlled repository");
     expect(prompt).not.toContain("Branch:");
+  });
+
+  it("includes jj working-copy information", () => {
+    const config = getDefaultConfig("Explore");
+    const prompt = buildAgentPrompt(config, "/workspace", envJj);
+    expect(prompt).toContain("Jujutsu repository: yes");
+    expect(prompt).toContain("Working copy: abc12345 agent work");
+    expect(prompt).not.toContain("Not a version-controlled repository");
   });
 
   it("Explore prompt is read-only", () => {

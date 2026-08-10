@@ -38,9 +38,16 @@ export function buildAgentPrompt(
 ): string {
   const activeAgentTag = `<active_agent name="${config.name}"/>\n\n`;
 
+  const gitInfo = `Git repository: yes\nBranch: ${env.branch}`;
+  const repositoryInfo = env.vcs === "jj"
+    ? `Jujutsu repository: yes\nWorking copy: ${env.change || "unknown"}` +
+      (env.isGitRepo ? `\n${gitInfo}` : "")
+    : env.isGitRepo
+      ? gitInfo
+      : "Not a version-controlled repository";
   const envBlock = `# Environment
 Working directory: ${cwd}
-${env.isGitRepo ? `Git repository: yes\nBranch: ${env.branch}` : "Not a git repository"}
+${repositoryInfo}
 Platform: ${env.platform}`;
 
   // Build optional extras suffix

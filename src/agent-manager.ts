@@ -13,9 +13,9 @@ import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
-import type { AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentInvocation, AgentRecord, IsolationBackend, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
-import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
+import { cleanupWorktree, createWorktree, pruneWorktrees } from "./worktree.js";
 
 export type OnAgentComplete = (record: AgentRecord) => void;
 export type OnAgentStart = (record: AgentRecord) => void;
@@ -82,15 +82,15 @@ interface SpawnOptions {
    * scheduler so a fired job can't be deferred past its trigger window.
    */
   bypassQueue?: boolean;
-  /** Isolation mode — "worktree" creates a temp git worktree for the agent. */
+  /** Isolation mode — "worktree" creates a temporary isolated repository workspace. */
   isolation?: IsolationMode;
   /**
    * Working directory for the agent (absolute path). Default: parent session
    * cwd. The agent's tools operate here, but .pi config (extensions, skills,
    * settings, memory) still loads from the parent session's project — the
    * target directory's `.pi` extensions never execute. With isolation:
-   * "worktree", the worktree is created FROM this directory and the result
-   * branch lands in that repo.
+   * "worktree", the workspace is created FROM this directory and the result
+   * branch/bookmark lands in that repository.
    */
   cwd?: string;
   /** Resolved invocation snapshot captured for UI display. */
@@ -128,6 +128,7 @@ export class AgentManager {
   private onStart?: OnAgentStart;
   private onCompact?: OnAgentCompact;
   private maxConcurrent: number;
+  private isolationBackend: IsolationBackend = "auto";
   /** Base repos worktrees were created from — so dispose() can prune them all,
    *  not just the parent repo (caller-supplied cwd can target other repos). */
   private worktreeRepos = new Set<string>();
@@ -161,6 +162,14 @@ export class AgentManager {
 
   getMaxConcurrent(): number {
     return this.maxConcurrent;
+  }
+
+  setIsolationBackend(backend: IsolationBackend): void {
+    this.isolationBackend = backend;
+  }
+
+  getIsolationBackend(): IsolationBackend {
+    return this.isolationBackend;
   }
 
   /**
@@ -235,16 +244,22 @@ export class AgentManager {
     const customCwd = options.cwd ?? undefined; // null (RPC "unset") → undefined
     const baseCwd = customCwd ?? ctx.cwd;
 
-    // Worktree isolation: try to create a temporary git worktree. Strict —
-    // fail loud if not possible (no silent fallback to main tree). Done
-    // BEFORE state mutation so a throw doesn't leave the record half-running.
+    // Worktree isolation is strict: fail loud instead of silently running in
+    // the main tree. The configured backend resolves inside createWorktree;
+    // `auto` chooses the nearest repo and prefers jj at a colocated root.
     let worktreeCwd: string | undefined;
     if (options.isolation === "worktree") {
-      const wt = createWorktree(baseCwd, id);
+      const wt = createWorktree(baseCwd, id, this.isolationBackend);
       if (!wt) {
+        const backend = this.isolationBackend;
+        const requirement = backend === "jj"
+          ? "a Jujutsu repository with at least one committed change and a working `jj workspace add`"
+          : backend === "git"
+            ? "a Git repository with at least one commit and a working `git worktree add`"
+            : "a Jujutsu or Git repository with at least one committed change";
         throw new Error(
-          'Cannot run with isolation: "worktree" — not a git repo, no commits yet, or `git worktree add` failed. ' +
-          'Initialize git and commit at least once, or omit `isolation`.',
+          `Cannot run with isolation: "worktree" using backend "${backend}" — requires ${requirement}. ` +
+          "Initialize the selected repository backend, fix workspace creation, or omit `isolation`.",
         );
       }
       record.worktree = wt;
@@ -352,12 +367,28 @@ export class AgentManager {
         if (record.worktree) {
           const wtResult = cleanupWorktree(baseCwd, record.worktree, options.description);
           record.worktreeResult = wtResult;
-          if (wtResult.hasChanges && wtResult.branch) {
-            // With a caller-supplied cwd the branch lives in THAT repo, not the
-            // parent session's — say so, or the orchestrator merges in the wrong repo.
-            const repoNote = customCwd !== undefined ? ` in \`${baseCwd}\`` : "";
+          const repoNote = customCwd !== undefined ? ` in \`${baseCwd}\`` : "";
+          const commandNote = customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : "";
+          if (wtResult.hasChanges && wtResult.ref && wtResult.refKind) {
+            const integrate = wtResult.backend === "jj"
+              ? `jj new @ ${wtResult.ref}`
+              : `git merge ${wtResult.ref}`;
+            const warnings = [
+              wtResult.baseDrifted ? "the jj base changed while the agent was running" : undefined,
+              wtResult.hasConflicts ? "the bookmark contains conflicts" : undefined,
+            ].filter(Boolean);
+            const warning = warnings.length > 0
+              ? ` Warning: ${warnings.join(" and ")}.` +
+                (wtResult.hasConflicts ? " Resolve the conflicts before integrating." : "") +
+                ` Inspect with: \`jj log -r ${wtResult.ref}\`.`
+              : "";
             record.result = (record.result ?? "") +
-              `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git merge ${wtResult.branch}\`${customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : ""}`;
+              `\n\n---\nChanges saved to ${wtResult.refKind} \`${wtResult.ref}\`${repoNote}.${warning} ` +
+              `Integrate with: \`${integrate}\`${commandNote}`;
+          } else if (wtResult.hasChanges && wtResult.error) {
+            record.result = (record.result ?? "") +
+              `\n\n---\nCould not preserve the isolated ${wtResult.backend} workspace as a ref: ${wtResult.error}. ` +
+              `Changes remain at \`${wtResult.path ?? record.worktree.path}\`.`;
           }
         }
 
@@ -678,7 +709,7 @@ export class AgentManager {
       record.session?.dispose();
     }
     this.agents.clear();
-    // Prune any orphaned git worktrees (crash recovery)
+    // Prune orphaned Git worktrees and plugin-created jj workspaces.
     try { pruneWorktrees(process.cwd()); } catch { /* ignore */ }
     // Also prune repos that caller-supplied cwds created worktrees in — a clean
     // exit with in-flight agents would otherwise leave stale registrations there.
