@@ -118,6 +118,34 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
   });
 
+  it("round-trips agentMentions modes; drops an unknown one", () => {
+    for (const mode of ["model", "direct", "off"] as const) {
+      saveSettings({ agentMentions: mode }, projectDir);
+      expect(loadSettings(projectDir)).toEqual({ agentMentions: mode });
+    }
+    writeProject({ agentMentions: "on" } as any);
+    expect(loadSettings(projectDir)).toEqual({}); // unknown mode dropped
+  });
+
+  it("reads the pre-mode agentMentions booleans as their modes", () => {
+    // The setting shipped as a boolean before `model` existed, so a config
+    // written then — or hand-written from the old README — must keep working.
+    // `true` meant "on", and on is now `model`.
+    writeProject({ agentMentions: true } as any);
+    expect(loadSettings(projectDir)).toEqual({ agentMentions: "model" });
+    writeProject({ agentMentions: false } as any);
+    expect(loadSettings(projectDir)).toEqual({ agentMentions: "off" });
+  });
+
+  it("round-trips rememberAgents (true and false); keeps boolean, drops non-boolean", () => {
+    saveSettings({ rememberAgents: false }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ rememberAgents: false });
+    saveSettings({ rememberAgents: true }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ rememberAgents: true });
+    writeProject({ rememberAgents: "on" } as any);
+    expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
+  });
+
   it("round-trips widgetMode; keeps valid values, drops invalid", () => {
     saveSettings({ widgetMode: "off" }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ widgetMode: "off" });
@@ -288,6 +316,20 @@ describe("settings persistence", () => {
       expect(loadSettings(projectDir)).toEqual({ scopeModels: false });
     });
 
+    it("accepts strictAgentFiles boolean (true and false)", () => {
+      writeProject({ strictAgentFiles: true });
+      expect(loadSettings(projectDir)).toEqual({ strictAgentFiles: true });
+      writeProject({ strictAgentFiles: false });
+      expect(loadSettings(projectDir)).toEqual({ strictAgentFiles: false });
+    });
+
+    it("drops non-boolean strictAgentFiles", () => {
+      writeProject({ strictAgentFiles: "yes" });
+      expect(loadSettings(projectDir).strictAgentFiles).toBeUndefined();
+      writeProject({ strictAgentFiles: 1 });
+      expect(loadSettings(projectDir).strictAgentFiles).toBeUndefined();
+    });
+
     it("drops non-boolean scopeModels", () => {
       writeProject({ scopeModels: "yes" });
       expect(loadSettings(projectDir).scopeModels).toBeUndefined();
@@ -427,9 +469,12 @@ describe("settings persistence", () => {
         setIsolationBackend: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
+        setStrictAgentFiles: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
+        setAgentMentions: vi.fn(),
+      setRememberAgents: vi.fn(),
         setWidgetMode: vi.fn(),
         setOutputTranscript: vi.fn(),
         setMaxSubagentDepth: vi.fn(),
@@ -493,10 +538,18 @@ describe("settings persistence", () => {
       expect(appliers.setIsolationBackend).toHaveBeenCalledWith("jj");
       expect(appliers.setSchedulingEnabled).toHaveBeenCalledWith(false);
       expect(appliers.setScopeModels).toHaveBeenCalledWith(true);
+      expect(appliers.setStrictAgentFiles).not.toHaveBeenCalled();  // absent from this snapshot
       expect(appliers.setDisableDefaultAgents).toHaveBeenCalledWith(true);
       expect(appliers.setToolDescriptionMode).toHaveBeenCalledWith("compact");
       expect(appliers.setFleetView).toHaveBeenCalledWith(false);
       expect(appliers.setWidgetMode).toHaveBeenCalledWith("off");
+    });
+
+    it("applies strictAgentFiles; skips it when absent", () => {
+      applySettings({ strictAgentFiles: true }, appliers);
+      expect(appliers.setStrictAgentFiles).toHaveBeenCalledWith(true);
+      applySettings({}, appliers);
+      expect(appliers.setStrictAgentFiles).toHaveBeenCalledTimes(1);
     });
 
     it("applies widgetMode; skips it when absent", () => {
@@ -511,6 +564,20 @@ describe("settings persistence", () => {
       expect(appliers.setFleetView).toHaveBeenCalledWith(true);
       applySettings({}, appliers);
       expect(appliers.setFleetView).toHaveBeenCalledTimes(1); // absence is "use default"
+    });
+
+    it("applies agentMentions; skips it when absent", () => {
+      applySettings({ agentMentions: "direct" }, appliers);
+      expect(appliers.setAgentMentions).toHaveBeenCalledWith("direct");
+      applySettings({}, appliers);
+      expect(appliers.setAgentMentions).toHaveBeenCalledTimes(1); // absence is "use default"
+    });
+
+    it("applies rememberAgents; skips it when absent", () => {
+      applySettings({ rememberAgents: false }, appliers);
+      expect(appliers.setRememberAgents).toHaveBeenCalledWith(false);
+      applySettings({}, appliers);
+      expect(appliers.setRememberAgents).toHaveBeenCalledTimes(1); // absence is "use default"
     });
 
     it("applies scopeModels: false", () => {
@@ -590,9 +657,12 @@ describe("settings persistence", () => {
         setIsolationBackend: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
+        setStrictAgentFiles: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
+        setAgentMentions: vi.fn(),
+      setRememberAgents: vi.fn(),
         setWidgetMode: vi.fn(),
         setOutputTranscript: vi.fn(),
         setMaxSubagentDepth: vi.fn(),

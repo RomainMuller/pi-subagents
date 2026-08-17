@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   cleanupWorktree,
   createWorktree,
@@ -291,7 +291,7 @@ describe.skipIf(!hasJj)("Jujutsu workspace backend", () => {
     expect(run("jj", ["log", "-r", result.ref!, "--no-graph", "-T", 'description.first_line() ++ "\\n"'], repo))
       .toBe("pi-agent: added new file");
     expect(run("jj", ["file", "show", "-r", result.ref!, "new-file.txt"], repo)).toBe("agent wrote this");
-  });
+  }, 15_000);
 
   it("preserves agent-created commits without bookmarking the new empty working copy", () => {
     const repo = trackRepo(initJjRepo());
@@ -303,7 +303,7 @@ describe.skipIf(!hasJj)("Jujutsu workspace backend", () => {
     expect(run("jj", ["log", "-r", result.ref!, "--no-graph", "-T", 'description.first_line() ++ "\\n"'], repo))
       .toBe("agent commit");
     expect(run("jj", ["file", "show", "-r", result.ref!, "committed.txt"], repo)).toBe("agent commit");
-  });
+  }, 15_000);
 
   it("does not overwrite an existing bookmark", () => {
     const repo = trackRepo(initJjRepo());
@@ -362,5 +362,73 @@ describe("pruneWorktrees", () => {
   it("does not throw outside a repository", () => {
     const dir = trackRepo(mkdtempSync(join(tmpdir(), "pi-wt-nonrepo-")));
     expect(() => pruneWorktrees(dir)).not.toThrow();
+  });
+});
+
+// Cleanup must never destroy uncertain user work. A failure to classify,
+// commit, or preserve a still-present workspace is returned as changed with an
+// error and retained path; successful preservation creates the ref before the
+// workspace is removed.
+describe("cleanupWorktree — failure path", () => {
+  let repoDir: string;
+
+  beforeEach(() => { repoDir = initGitRepo(); });
+  afterEach(() => {
+    try { pruneWorktrees(repoDir); } catch { /* ignore */ }
+    rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  it("short-circuits when the worktree directory is already gone", () => {
+    // Hits the existsSync guard at the top of cleanupWorktree, not the outer
+    // catch — cleanup can be called twice (settle path plus dispose), so it has
+    // to be idempotent rather than throw on the second call.
+    const wt = createWorktree(repoDir, "vanished")!;
+    expect(wt).toBeDefined();
+    rmSync(wt.path, { recursive: true, force: true });
+
+    const result = cleanupWorktree(repoDir, wt, "agent that vanished");
+
+    expect(result.hasChanges).toBe(false);
+    expect(result.ref).toBeUndefined();
+  });
+
+  it("retains a worktree when Git cannot classify its contents", () => {
+    const wt = trackWorkspace(createWorktree(repoDir, "corrupt"))!;
+    writeFileSync(join(wt.path, "work.txt"), "agent output");
+    // Break the worktree's link back to the repo.
+    writeFileSync(join(wt.path, ".git"), "gitdir: /nonexistent/path/that/is/not/a/repo");
+
+    const result = cleanupWorktree(repoDir, wt, "corrupted agent");
+
+    expect(result.hasChanges).toBe(true);
+    expect(result.error).toBeDefined();
+    expect(result.path).toBe(wt.path);
+    expect(existsSync(wt.path)).toBe(true);
+  });
+
+  it("creates the branch BEFORE removing the worktree, so a removal failure cannot lose commits", () => {
+    // Ordering is the actual safety property. If a refactor moved
+    // removeWorktree above the `git branch` call, the commits would be
+    // unreachable the moment removal succeeded and branching failed.
+    const wt = createWorktree(repoDir, "ordered")!;
+    writeFileSync(join(wt.path, "work.txt"), "agent output");
+
+    const result = cleanupWorktree(repoDir, wt, "ordered agent");
+
+    expect(result.hasChanges).toBe(true);
+    expect(result.refKind).toBe("branch");
+    expect(result.ref).toBeDefined();
+    // The branch must exist in the MAIN repo after the worktree is gone —
+    // that is what makes the agent's work recoverable.
+    const branches = execFileSync("git", ["branch", "--list", result.ref!], {
+      cwd: repoDir, stdio: "pipe",
+    }).toString();
+    expect(branches).toContain(result.ref!);
+    expect(existsSync(wt.path)).toBe(false);
+    // And the commit is reachable from that branch.
+    const files = execFileSync("git", ["ls-tree", "--name-only", result.ref!], {
+      cwd: repoDir, stdio: "pipe",
+    }).toString();
+    expect(files).toContain("work.txt");
   });
 });

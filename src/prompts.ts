@@ -3,6 +3,7 @@
  */
 
 import type { AgentConfig, EnvInfo } from "./types.js";
+import type { ResolvedIsolationBackend } from "./worktree.js";
 
 /** Extra sections to inject into the system prompt (memory, skills, etc.). */
 export interface PromptExtras {
@@ -10,6 +11,14 @@ export interface PromptExtras {
   memoryBlock?: string;
   /** Preloaded skill contents to inject. */
   skillBlocks?: { name: string; content: string }[];
+  /**
+   * Parent directory the worktree copy was created from. Set only for
+   * `isolation: "worktree"` spawns — triggers the block that tells the agent
+   * to stay in the copy.
+   */
+  worktreeBase?: string;
+  /** Resolved repository backend for the isolated workspace. */
+  worktreeBackend?: ResolvedIsolationBackend;
 }
 
 /**
@@ -50,6 +59,24 @@ Working directory: ${cwd}
 ${repositoryInfo}
 Platform: ${env.platform}`;
 
+  // A worktree agent is told its cwd twice: by the env block above (the copy)
+  // and by whatever names the main checkout — the inherited parent prompt in
+  // append mode, or the task prompt in either mode. It follows the latter and
+  // works in the shared tree (#187), so resolve the contradiction explicitly.
+  const worktreeBlock = extras?.worktreeBase
+    ? extras.worktreeBackend === "jj"
+      ? `\n\n<worktree_isolation>
+Your working directory is an isolated Jujutsu workspace created from ${extras.worktreeBase}.
+Work only inside it — never in ${extras.worktreeBase}, even if other instructions name that path as your working directory.
+Use jj for version-control operations. Git commands do not work inside this workspace.
+This workspace shares its repository and operation log with the main checkout. Do not run jj op or jj workspace commands, and do not rewrite or abandon changes outside this workspace's own work.
+</worktree_isolation>`
+      : `\n\n<worktree_isolation>
+Your working directory is an isolated Git worktree copy of ${extras.worktreeBase}.
+Work only inside it — never in ${extras.worktreeBase}, even if other instructions name that path as your working directory.
+</worktree_isolation>`
+    : "";
+
   // Build optional extras suffix
   const extraSections: string[] = [];
   if (extras?.memoryBlock) {
@@ -87,7 +114,7 @@ You are operating as a sub-agent invoked to handle a specific task.
     // placed verbatim (no wrapper tag) so it forms an identical byte prefix
     // with the parent session, maximising KV cache hits. The <active_agent>
     // tag and env block vary per call and are placed after the cached prefix.
-    return identity + "\n\n" + bridge + "\n\n" + activeAgentTag + envBlock + customSection + extrasSuffix;
+    return identity + "\n\n" + bridge + "\n\n" + activeAgentTag + envBlock + worktreeBlock + customSection + extrasSuffix;
   }
 
   // "replace" mode — env header + the config's full system prompt
@@ -96,7 +123,7 @@ You have been invoked to handle a specific task autonomously.
 
 ${envBlock}`;
 
-  return activeAgentTag + replaceHeader + "\n\n" + config.systemPrompt + extrasSuffix;
+  return activeAgentTag + replaceHeader + worktreeBlock + "\n\n" + config.systemPrompt + extrasSuffix;
 }
 
 /** Fallback base prompt when parent system prompt is unavailable in append mode. */

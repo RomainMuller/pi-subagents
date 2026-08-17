@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { NO_FALLBACK } from "./agent-types.js";
-import type { IsolationBackend, JoinMode, WidgetMode } from "./types.js";
+import type { AgentMentionMode, IsolationBackend, JoinMode, WidgetMode } from "./types.js";
 
 export interface SubagentsSettings {
   maxConcurrent?: number;
@@ -56,6 +56,18 @@ export interface SubagentsSettings {
    */
   scopeModels?: boolean;
   /**
+   * When true, an unreadable or unparseable agent `.md` aborts extension load
+   * instead of being skipped with a warning — pi exits, naming the file.
+   *
+   * Startup only, by design. Mid-session reloads (one per `Agent` call) keep
+   * warning: a bad edit at 3pm should not kill the session on the next
+   * unrelated spawn, where the failure would look disconnected from its cause.
+   * For a checked-in `.pi/agents/`, failing at startup is the point — the
+   * alternative is running a *different* agent than the file names.
+   * Defaults to false.
+   */
+  strictAgentFiles?: boolean;
+  /**
    * When true, the three built-in default agents (general-purpose, Explore, Plan)
    * are not registered at startup. User-defined agents from project/global custom
    * agent dirs are completely unaffected — only the hardcoded DEFAULT_AGENTS are suppressed.
@@ -79,6 +91,34 @@ export interface SubagentsSettings {
    * the list never registers and the global key handler never captures input.
    */
   fleetView?: boolean;
+  /**
+   * Whether `@handle message` typed at the prompt is routed to that subagent
+   * instead of the main model, and whether `@` offers running agents alongside
+   * pi's file completion. Defaults to `model`. Applied live.
+   *
+   *   - `model`: mentioning an agent that is not running asks the main model to
+   *     spawn it with the `Agent` tool, Claude Code's behaviour. Costs a turn,
+   *     and the model writes the agent's prompt rather than your text being it.
+   *   - `direct`: that agent is started here instead, with the typed message as
+   *     its prompt and no main-model turn spent.
+   *   - `off`: the input hook falls straight through and the stacked
+   *     autocomplete provider delegates everything back to pi's built-in one.
+   *
+   * Messaging a running agent and resuming a finished one are direct in both
+   * `model` and `direct`. The legacy booleans are still accepted: `true` reads
+   * as `model`, `false` as `off`.
+   */
+  agentMentions?: AgentMentionMode;
+  /**
+   * Whether subagents persist their pi session by default, so `@handle` can
+   * reopen an agent's conversation long after its in-memory record is gone.
+   * Defaults to `true`. Per-agent `persist_session:` frontmatter overrides it
+   * in both directions. Turning it off restores the previous behaviour, where
+   * a handle stops resolving roughly ten minutes after the agent finishes and
+   * mentioning it starts a fresh run instead. Persisted sessions also appear
+   * nested under the spawning session in pi's `/resume`.
+   */
+  rememberAgents?: boolean;
   /**
    * Display mode for the persistent above-editor agent widget:
    *   - `all`: show every agent (foreground + background).
@@ -136,9 +176,12 @@ export interface SettingsAppliers {
   setIsolationBackend: (backend: IsolationBackend) => void;
   setSchedulingEnabled: (b: boolean) => void;
   setScopeModels: (enabled: boolean) => void;
+  setStrictAgentFiles: (b: boolean) => void;
   setDisableDefaultAgents: (b: boolean) => void;
   setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
   setFleetView: (b: boolean) => void;
+  setAgentMentions: (mode: AgentMentionMode) => void;
+  setRememberAgents: (b: boolean) => void;
   setWidgetMode: (mode: WidgetMode) => void;
   setOutputTranscript: (b: boolean) => void;
   setMaxSubagentDepth: (n: number) => void;
@@ -152,6 +195,7 @@ const VALID_JOIN_MODES: ReadonlySet<string> = new Set<JoinMode>(["async", "group
 const VALID_ISOLATION_BACKENDS: ReadonlySet<string> = new Set<IsolationBackend>(["auto", "jj", "git"]);
 const VALID_TOOL_DESCRIPTION_MODES: ReadonlySet<string> = new Set<ToolDescriptionMode>(["full", "compact", "custom"]);
 const VALID_WIDGET_MODES: ReadonlySet<string> = new Set<WidgetMode>(["all", "background", "off"]);
+const VALID_AGENT_MENTION_MODES: ReadonlySet<string> = new Set<AgentMentionMode>(["model", "direct", "off"]);
 
 // Sanity ceilings — prevent hand-edited configs from asking for values that
 // make no operational sense (e.g. 1e6 concurrent subagents). Permissive enough
@@ -206,6 +250,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.scopeModels === "boolean") {
     out.scopeModels = r.scopeModels;
   }
+  if (typeof r.strictAgentFiles === "boolean") {
+    out.strictAgentFiles = r.strictAgentFiles;
+  }
   if (typeof r.disableDefaultAgents === "boolean") {
     out.disableDefaultAgents = r.disableDefaultAgents;
   }
@@ -214,6 +261,16 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.fleetView === "boolean") {
     out.fleetView = r.fleetView;
+  }
+  // Was a boolean before the `model` mode existed. A hand-written or
+  // previously-written `true` means "on", which is now the default `model`.
+  if (typeof r.agentMentions === "boolean") {
+    out.agentMentions = r.agentMentions ? "model" : "off";
+  } else if (typeof r.agentMentions === "string" && VALID_AGENT_MENTION_MODES.has(r.agentMentions)) {
+    out.agentMentions = r.agentMentions as AgentMentionMode;
+  }
+  if (typeof r.rememberAgents === "boolean") {
+    out.rememberAgents = r.rememberAgents;
   }
   if (typeof r.widgetMode === "string" && VALID_WIDGET_MODES.has(r.widgetMode)) {
     out.widgetMode = r.widgetMode as WidgetMode;
@@ -290,9 +347,12 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (s.isolationBackend) appliers.setIsolationBackend(s.isolationBackend);
   if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
   if (typeof s.scopeModels === "boolean") appliers.setScopeModels(s.scopeModels);
+  if (typeof s.strictAgentFiles === "boolean") appliers.setStrictAgentFiles(s.strictAgentFiles);
   if (typeof s.disableDefaultAgents === "boolean") appliers.setDisableDefaultAgents(s.disableDefaultAgents);
   if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);
   if (typeof s.fleetView === "boolean") appliers.setFleetView(s.fleetView);
+  if (s.agentMentions) appliers.setAgentMentions(s.agentMentions);
+  if (typeof s.rememberAgents === "boolean") appliers.setRememberAgents(s.rememberAgents);
   if (s.widgetMode) appliers.setWidgetMode(s.widgetMode);
   if (typeof s.outputTranscript === "boolean") appliers.setOutputTranscript(s.outputTranscript);
 }
