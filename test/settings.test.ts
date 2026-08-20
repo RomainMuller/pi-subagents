@@ -164,6 +164,47 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
   });
 
+  it("round-trips backgroundByDefault (true and false), and absence stays absent", () => {
+    // `false` is the load-bearing case: it's how a user restores the previous
+    // foreground default, so it must survive a save/load rather than being
+    // read back as absent and re-defaulting to background.
+    saveSettings({ backgroundByDefault: false }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ backgroundByDefault: false });
+
+    saveSettings({ backgroundByDefault: true }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ backgroundByDefault: true });
+
+    saveSettings({}, projectDir);
+    expect(loadSettings(projectDir)).toEqual({});
+  });
+
+  it("sanitize drops non-boolean backgroundByDefault silently", () => {
+    writeProject({ backgroundByDefault: "yes" } as any);
+    expect(loadSettings(projectDir)).toEqual({});
+    writeProject({ backgroundByDefault: 0 } as any);
+    expect(loadSettings(projectDir)).toEqual({});
+  });
+
+  it("round-trips worktreeIsolation; drops non-boolean", () => {
+    saveSettings({ worktreeIsolation: false }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ worktreeIsolation: false });
+    saveSettings({ worktreeIsolation: true }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ worktreeIsolation: true });
+    writeProject({ worktreeIsolation: "off" } as any);
+    expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
+  });
+
+  it("round-trips reportUsage and showCost; drops non-boolean", () => {
+    saveSettings({ reportUsage: true, showCost: true }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ reportUsage: true, showCost: true });
+    saveSettings({ reportUsage: false, showCost: false }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ reportUsage: false, showCost: false });
+    // The sanitizer is an allowlist: a key it does not name is dropped, and the
+    // setting silently never applies.
+    writeProject({ reportUsage: "on", showCost: 1 } as any);
+    expect(loadSettings(projectDir)).toEqual({});
+  });
+
   it("sanitize drops non-boolean schedulingEnabled silently", async () => {
     writeProject({ schedulingEnabled: "yes" } as any);
     expect(loadSettings(projectDir)).toEqual({});
@@ -467,6 +508,7 @@ describe("settings persistence", () => {
         setGraceTurns: vi.fn(),
         setDefaultJoinMode: vi.fn(),
         setIsolationBackend: vi.fn(),
+        setBackgroundByDefault: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
         setStrictAgentFiles: vi.fn(),
@@ -477,13 +519,28 @@ describe("settings persistence", () => {
       setRememberAgents: vi.fn(),
         setWidgetMode: vi.fn(),
         setOutputTranscript: vi.fn(),
+        setWorktreeIsolation: vi.fn(),
         setMaxSubagentDepth: vi.fn(),
         setFallbackSubagent: vi.fn(),
+        setReportUsage: vi.fn(),
+        setShowCost: vi.fn(),
       };
+    });
+
+    it("applies reportUsage and showCost", () => {
+      applySettings({ reportUsage: true, showCost: true }, appliers);
+      expect(appliers.setReportUsage).toHaveBeenCalledWith(true);
+      expect(appliers.setShowCost).toHaveBeenCalledWith(true);
+
+      applySettings({ reportUsage: false, showCost: false }, appliers);
+      expect(appliers.setReportUsage).toHaveBeenCalledWith(false);
+      expect(appliers.setShowCost).toHaveBeenCalledWith(false);
     });
 
     it("is a no-op on an empty settings object", () => {
       applySettings({}, appliers);
+      expect(appliers.setReportUsage).not.toHaveBeenCalled();
+      expect(appliers.setShowCost).not.toHaveBeenCalled();
       expect(appliers.setMaxConcurrent).not.toHaveBeenCalled();
       expect(appliers.setDefaultMaxTurns).not.toHaveBeenCalled();
       expect(appliers.setGraceTurns).not.toHaveBeenCalled();
@@ -602,9 +659,30 @@ describe("settings persistence", () => {
       expect(appliers.setOutputTranscript).toHaveBeenCalledWith(true);
     });
 
+    it("applies worktreeIsolation (both true and false)", () => {
+      applySettings({ worktreeIsolation: false }, appliers);
+      expect(appliers.setWorktreeIsolation).toHaveBeenCalledWith(false);
+      applySettings({ worktreeIsolation: true }, appliers);
+      expect(appliers.setWorktreeIsolation).toHaveBeenCalledWith(true);
+    });
+
     it("applies defaultMaxTurns: 0 as the explicit unlimited marker", () => {
       applySettings({ defaultMaxTurns: 0 }, appliers);
       expect(appliers.setDefaultMaxTurns).toHaveBeenCalledWith(0);
+    });
+
+    it("calls setBackgroundByDefault with either boolean", () => {
+      applySettings({ backgroundByDefault: false }, appliers);
+      expect(appliers.setBackgroundByDefault).toHaveBeenCalledWith(false);
+      applySettings({ backgroundByDefault: true }, appliers);
+      expect(appliers.setBackgroundByDefault).toHaveBeenCalledWith(true);
+    });
+
+    // Absence must leave the in-memory default (background) alone — calling
+    // the applier with `undefined` would read as foreground at the spawn site.
+    it("does not call setBackgroundByDefault when the field is absent", () => {
+      applySettings({ maxConcurrent: 4 }, appliers);
+      expect(appliers.setBackgroundByDefault).not.toHaveBeenCalled();
     });
 
     // Wiring tests for the master switch — ensures the schedulingEnabled
@@ -655,6 +733,7 @@ describe("settings persistence", () => {
         setGraceTurns: vi.fn(),
         setDefaultJoinMode: vi.fn(),
         setIsolationBackend: vi.fn(),
+        setBackgroundByDefault: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
         setStrictAgentFiles: vi.fn(),
@@ -665,8 +744,11 @@ describe("settings persistence", () => {
       setRememberAgents: vi.fn(),
         setWidgetMode: vi.fn(),
         setOutputTranscript: vi.fn(),
+        setWorktreeIsolation: vi.fn(),
         setMaxSubagentDepth: vi.fn(),
         setFallbackSubagent: vi.fn(),
+        setReportUsage: vi.fn(),
+        setShowCost: vi.fn(),
       };
     });
 

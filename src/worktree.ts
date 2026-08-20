@@ -47,6 +47,17 @@ export interface JjWorktreeInfo extends BaseWorktreeInfo {
 
 export type WorktreeInfo = GitWorktreeInfo | JjWorktreeInfo;
 
+/** Project-wide switch for repository workspace isolation. */
+let worktreeIsolationEnabled = true;
+
+export function setWorktreeIsolationEnabled(enabled: boolean): void {
+  worktreeIsolationEnabled = enabled;
+}
+
+export function isWorktreeIsolationEnabled(): boolean {
+  return worktreeIsolationEnabled;
+}
+
 export interface WorktreeCleanupResult {
   /** Whether changes or new history were found. */
   hasChanges: boolean;

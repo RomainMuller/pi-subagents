@@ -848,6 +848,39 @@ Bad isolation.`);
     expect(result.get("bad-isolation")!.isolation).toBeUndefined();
   });
 
+  // `isolation: off` is a veto, not a synonym for omitting the field: agent
+  // config outranks tool-call params, so it turns a caller's "worktree" back
+  // off. That is why it must survive parsing as "off" rather than undefined.
+  it("parses isolation: off", () => {
+    writeAgent("no-wt", `---
+description: Never worktree
+isolation: off
+---
+
+No worktree.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("no-wt")!.isolation).toBe("off");
+  });
+
+  // pi's frontmatter parser is not YAML 1.1, so bare `off`/`no` stay strings
+  // and only `false` becomes a boolean — accept the spellings an author is
+  // likely to reach for rather than silently dropping them.
+  it.each([
+    ["false", "isolation: false"],
+    ["none", "isolation: none"],
+    ["no", "isolation: no"],
+  ])("accepts %s as a spelling of off", (name, line) => {
+    writeAgent(`off-${name}`, `---
+${line}
+---
+
+Off.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get(`off-${name}`)!.isolation).toBe("off");
+  });
+
   // A YAML error in one file used to escape loadFromDir and abort the whole
   // extension load — pi exited 1 before the TUI. Regression for #212.
   it("skips a file with malformed frontmatter and still loads the others", () => {
@@ -1082,6 +1115,20 @@ Good body.`);
       expect(loaded.isolated).toBe(true);
       expect(loaded.memory).toBe("project");
       expect(loaded.isolation).toBe("worktree");
+    });
+
+    // The writer used to emit `run_in_background` only when truthy, so an
+    // explicit `false` was dropped. Harmless while foreground was the default
+    // and omission meant the same thing — but with `backgroundByDefault` on,
+    // dropping it flips the ejected agent to background.
+    it("preserves an explicit run_in_background: false instead of dropping it", () => {
+      expect(roundTrip({ runInBackground: false }).runInBackground).toBe(false);
+    });
+
+    it("leaves run_in_background unset when the config doesn't pin it", () => {
+      // Absent must stay absent — writing a value would freeze the agent
+      // against the setting rather than letting it follow the default.
+      expect(roundTrip({}).runInBackground).toBeUndefined();
     });
 
     it("preserves the extension and skill list fields", () => {

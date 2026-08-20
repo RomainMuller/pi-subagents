@@ -18,8 +18,18 @@ export const DEFAULT_AGENT_NAMES = ["general-purpose", "Explore", "Plan"] as con
 /** Memory scope for persistent agent memory. */
 export type MemoryScope = "user" | "project" | "local";
 
-/** Isolation mode for agent execution. */
-export type IsolationMode = "worktree";
+/**
+ * Isolation mode for agent execution.
+ *
+ * `"off"` exists for the caller's benefit, not the runtime's: models that fill
+ * every optional parameter had no legal way to decline a single-value
+ * `isolation` field and kept spawning worktrees they had just reasoned their
+ * way out of (#231, #184). It is an input spelling only —
+ * `resolveAgentInvocationConfig` collapses it to `undefined`, so nothing
+ * downstream sees a value other than `"worktree"`. In an agent file it is a
+ * genuine veto, since agent config outranks tool-call params.
+ */
+export type IsolationMode = "worktree" | "off";
 
 /** Repository backend used for worktree isolation. */
 export type IsolationBackend = "auto" | "jj" | "git";
@@ -69,7 +79,10 @@ export interface AgentConfig {
   isolated?: boolean;
   /** Persistent memory scope — agents with memory get a persistent directory and MEMORY.md */
   memory?: MemoryScope;
-  /** Isolation mode — "worktree" runs the agent in a temporary isolated repository workspace. */
+  /**
+   * Isolation mode — "worktree" uses a temporary repository workspace;
+   * "off" refuses one even when the caller asks (frontmatter wins).
+   */
   isolation?: IsolationMode;
   /** true = this is an embedded default agent (informational) */
   isDefault?: boolean;
@@ -234,6 +247,12 @@ export interface NotificationDetails {
   turnCount: number;
   maxTurns?: number;
   totalTokens: number;
+  /**
+   * Estimated cost in USD, from pi's per-message `usage.cost.total`. Always
+   * populated (0 when the model has no pricing); the renderer decides whether
+   * to show it, per the `showCost` setting.
+   */
+  totalCost?: number;
   durationMs: number;
   outputFile?: string;
   error?: string;

@@ -6,9 +6,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   cleanupWorktree,
   createWorktree,
+  isWorktreeIsolationEnabled,
   pruneWorktrees,
+  setWorktreeIsolationEnabled,
   type WorktreeInfo,
 } from "../src/worktree.js";
+
+// Real jj workspace operations can exceed Vitest's 5-second default under the
+// full suite's CPU and filesystem contention.
+vi.setConfig({ testTimeout: 30_000 });
 
 function run(command: string, args: string[], cwd: string): string {
   return execFileSync(command, args, { cwd, stdio: "pipe" }).toString().trim();
@@ -73,7 +79,7 @@ describe("isolation backend selection", () => {
     const repo = trackRepo(initJjRepo(true));
     const wt = trackWorkspace(createWorktree(repo, "auto-jj"));
     expect(wt?.backend).toBe("jj");
-  });
+  }, 15_000);
 
   it("auto falls back to Git outside a jj repository", () => {
     const repo = trackRepo(initGitRepo());
@@ -188,7 +194,7 @@ describe.skipIf(!hasJj)("Jujutsu workspace backend", () => {
 
     expect(readFileSync(join(wt.path, "README.md"), "utf-8")).toBe("# Test repo");
     expect(cleanupWorktree(repo, wt, "idle")).toEqual({ hasChanges: false, backend: "jj" });
-  });
+  }, 15_000);
 
   it("reports base drift and conflicts when the caller rewrites @-", () => {
     const repo = trackRepo(initJjRepo());
@@ -225,7 +231,7 @@ describe.skipIf(!hasJj)("Jujutsu workspace backend", () => {
 
     expect(first.path).not.toBe(second.path);
     expect(first.workspaceName).not.toBe(second.workspaceName);
-  });
+  }, 15_000);
 
   it("prefers a nested Git repository over an ancestor jj repository", () => {
     const outer = trackRepo(initJjRepo());
@@ -263,7 +269,7 @@ describe.skipIf(!hasJj)("Jujutsu workspace backend", () => {
 
     const wt = trackWorkspace(createWorktree(join(repo, "packages", "api"), "jj-subdir", "jj"))!;
     expect(wt.workPath).toBe(join(wt.path, "packages", "api"));
-  });
+  }, 15_000);
 
   it("removes a clean workspace and forgets its registration", () => {
     const repo = trackRepo(initJjRepo());
@@ -430,5 +436,43 @@ describe("cleanupWorktree — failure path", () => {
       cwd: repoDir, stdio: "pipe",
     }).toString();
     expect(files).toContain("work.txt");
+  });
+});
+
+/**
+ * The project switch itself (`worktreeIsolation`, #184). Its consumers —
+ * agent-manager, both tool schemas, the invocation resolver — all mock this
+ * module, so without this block the real singleton is never executed and its
+ * default is never exercised. That default is what every "worktree isolation
+ * still behaves as before" claim rests on.
+ */
+describe("worktree isolation switch", () => {
+  afterEach(() => setWorktreeIsolationEnabled(true));
+
+  it("defaults to enabled", () => {
+    expect(isWorktreeIsolationEnabled()).toBe(true);
+  });
+
+  it("round-trips both ways", () => {
+    setWorktreeIsolationEnabled(false);
+    expect(isWorktreeIsolationEnabled()).toBe(false);
+    setWorktreeIsolationEnabled(true);
+    expect(isWorktreeIsolationEnabled()).toBe(true);
+  });
+
+  // The switch gates callers; it deliberately does not disarm createWorktree
+  // itself, so a caller that has already decided (agent-manager checks first)
+  // still gets a real worktree rather than a silent no-op.
+  it("does not disable createWorktree directly", () => {
+    const repoDir = initGitRepo();
+    try {
+      setWorktreeIsolationEnabled(false);
+      const wt = createWorktree(repoDir, "switch-test");
+      expect(wt).toBeDefined();
+      cleanupWorktree(repoDir, wt!, "switch test");
+    } finally {
+      pruneWorktrees(repoDir);
+      rmSync(repoDir, { recursive: true, force: true });
+    }
   });
 });
